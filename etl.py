@@ -1,85 +1,113 @@
-from db_config import get_connection
+from datetime import datetime
+from mongo_config import get_mongo_db
+import mysql.connector
+from mysql_config import get_connection
 
 def etl_criar_cliente(cliente):
-    dw = get_connection("DW_LetraViva")
-    cursor = dw.cursor()
-    cursor.execute("""
-        INSERT INTO dim_cliente (id, nome, email, endereco)
-        VALUES (%s, %s, %s, %s)
-    """, (cliente['id'], cliente['nome'], cliente['email'], cliente['endereco']))
-    dw.commit()
-    cursor.close()
-    dw.close()
+    db = get_mongo_db()
+    collection = db["clientesCriados"]
 
-def etl_login(cliente_id):
-    dw = get_connection("DW_LetraViva")
-    cursor = dw.cursor()
-    cursor.execute("REPLACE INTO dim_login (cliente_id, ultimo_login) VALUES (%s, NOW())", (cliente_id,))
-    dw.commit()
-    cursor.close()
-    dw.close()
+    document = {
+        "cliente_id": cliente["id"],
+        "nome": cliente["nome"],
+        "email": cliente["email"],
+        "senha": cliente["senha"],
+        "endereco": cliente["endereco"]
+    }
+
+    collection.insert_one(document)
+    print(f"Cliente {cliente['nome']} registrado no MongoDB com todos os dados.")
+
+
+def etl_login(cliente_id, nome):
+    db = get_mongo_db()
+    collection = db["logins"]
+
+    document = {
+        "cliente_id": cliente_id,
+        "nome": nome,
+        "data_login": datetime.now().isoformat()
+    }
+
+    collection.insert_one(document)
+    print(f"Login de {nome} registrado no MongoDB.")
+
 
 def etl_criar_livro(livro):
-    dw = get_connection("DW_LetraViva")
-    cursor = dw.cursor()
-    cursor.execute("""
-        INSERT INTO dim_livro (id, autor, titulo, preco, genero, ano_publicacao)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (
-        livro['id'],
-        livro['autor_nome'],  # corresponde à coluna 'autor'
-        livro['titulo'],
-        livro['preco'],
-        livro['genero'],
-        livro.get('ano_publicacao')  # pode ser None, se não enviado
-    ))
-    dw.commit()
-    cursor.close()
-    dw.close()
-    
+    db = get_mongo_db()
+    collection = db["livrosCriados"]
+
+    document = {
+        "livro_id": livro["id"],
+        "titulo": livro["titulo"],
+        "genero": livro["genero"],
+        "autor": livro["autor_nome"],
+        "preco": float(livro["preco"])
+    }
+
+    collection.insert_one(document)
+    print(f"Livro '{livro['titulo']}' registrado no MongoDB.")
+
+
 def etl_faturar_pedido(pedido_id):
-    ecommerce = get_connection("ecommerce_letraviva")
-    dw = get_connection("DW_LetraViva")
-    cur = ecommerce.cursor(dictionary=True)
-    
-    # Pega info do pedido
-    cur.execute("""
-        SELECT p.*, c.nome AS cliente_nome, c.email, c.endereco, f.tipo_pagamento
+    conn = get_connection("ecommerce_letraviva")
+    cursor = conn.cursor(dictionary=True)
+
+    query = """
+        SELECT 
+            p.id AS pedido_id,
+            p.data AS data_pedido,
+            c.nome AS cliente_nome,
+            c.email AS cliente_email,
+            c.endereco AS cliente_endereco,
+            l.titulo AS livro_titulo,
+            ip.quantidade,
+            ip.preco_unitario,
+            p.pagamento_id,
+            f.tipo_pagamento,
+            p.endereco_entrega
         FROM pedidos p
-        JOIN clientes c ON c.id = p.cliente_id
+        JOIN clientes c ON p.cliente_id = c.id
+        JOIN itens_pedido ip ON ip.pedido_id = p.id
+        JOIN livros l ON l.id = ip.livro_id
         JOIN formas_pagamento f ON f.id = p.pagamento_id
         WHERE p.id = %s
-    """, (pedido_id,))
-    pedido = cur.fetchone()
+    """
+    cursor.execute(query, (pedido_id,))
 
-    # Pega itens do pedido
-    cur.execute("""
-        SELECT i.*, l.titulo, l.genero, l.preco, a.nome AS autor_nome
-        FROM itens_pedido i
-        JOIN livros l ON l.id = i.livro_id
-        JOIN autores a ON a.id = l.autor_id
-        WHERE i.pedido_id = %s
-    """, (pedido_id,))
-    itens = cur.fetchall()
+    rows = cursor.fetchall()
+    if not rows:
+        print(f"Nenhum dado encontrado para o pedido {pedido_id}")
+        return
 
-    cur_dw = dw.cursor()
-    for item in itens:
-        total = item['quantidade'] * item['preco_unitario']
-        cur_dw.execute("""
-            INSERT INTO fato_pedido_completo (
-                cliente_id, cliente_nome, livro_titulo, genero,
-                autor_nome, quantidade, preco_unitario, total,
-                forma_pagamento, endereco_entrega, data_pedido
-            )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (
-            pedido['cliente_id'], pedido['cliente_nome'], item['titulo'], item['genero'],
-            item['autor_nome'], item['quantidade'], item['preco_unitario'], total,
-            pedido['tipo_pagamento'], pedido['endereco_entrega'], pedido['data']
-        ))
+    row0 = rows[0]
+    documento = {
+        "pedido_id": row0["pedido_id"],
+        "data_pedido": row0["data_pedido"].isoformat(),
+        "cliente": {
+            "nome": row0["cliente_nome"],
+            "email": row0["cliente_email"],
+            "endereco": row0["cliente_endereco"]
+        },
+        "forma_pagamento": {
+            "id": row0["pagamento_id"],
+            "descricao": row0["tipo_pagamento"]
+        },
+        "endereco_entrega": row0["endereco_entrega"],
+        "itens": []
+    }
 
-    dw.commit()
-    cur.close()
-    cur_dw.close()
-    ecommerce.close()
-    dw.close()
+    for row in rows:
+        documento["itens"].append({
+            "livro": row["livro_titulo"],
+            "quantidade": row["quantidade"],
+            "preco_unitario": float(row["preco_unitario"])
+        })
+
+    db = get_mongo_db()
+    collection = db["pedidosFaturados"]
+    collection.insert_one(documento)
+
+    print(f"Pedido {pedido_id} inserido no MongoDB com sucesso.")
+    cursor.close()
+    conn.close()

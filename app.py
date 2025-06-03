@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
-from db_config import get_connection
-from etl import etl_criar_livro
-from etl import etl_criar_cliente, etl_login, etl_faturar_pedido
+from mysql_config import get_connection
+from etl import etl_criar_livro, etl_criar_cliente, etl_login, etl_faturar_pedido
 
 app = Flask(__name__)
 
@@ -23,17 +22,22 @@ def criar_conta():
     etl_criar_cliente(data)
     return jsonify({"status": "conta criada", "id": cliente_id})
 
+
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
     conn = get_connection("ecommerce_letraviva")
     cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id FROM clientes WHERE email = %s AND senha = %s", (data['email'], data['senha']))
+    cur.execute("SELECT id, nome FROM clientes WHERE email = %s AND senha = %s", (data['email'], data['senha']))
     cliente = cur.fetchone()
+    cur.close()
+    conn.close()
+    
     if cliente:
-        etl_login(cliente['id'])
+        etl_login(cliente_id=cliente['id'], nome=cliente['nome'])  # <- nome incluído
         return jsonify({"status": "login efetuado"})
     return jsonify({"status": "erro"}), 401
+
 
 @app.route("/adicionarLivro", methods=["POST"])
 def adicionar_livro():
@@ -73,28 +77,34 @@ def adicionar_livro():
 
 @app.route("/faturarPedido", methods=["POST"])
 def faturar_pedido():
-    data = request.json
-    conn = get_connection("ecommerce_letraviva")
-    cur = conn.cursor()
+    try:
+        data = request.json
+        conn = get_connection("ecommerce_letraviva")
+        cur = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO pedidos (cliente_id, data, pagamento_id, endereco_entrega)
-        VALUES (%s, NOW(), %s, %s)
-    """, (data['cliente_id'], data['pagamento_id'], data['endereco_entrega']))
-    pedido_id = cur.lastrowid
-
-    for item in data['itens']:
         cur.execute("""
-            INSERT INTO itens_pedido (pedido_id, livro_id, quantidade, preco_unitario)
-            VALUES (%s, %s, %s, %s)
-        """, (pedido_id, item['livro_id'], item['quantidade'], item['preco_unitario']))
+            INSERT INTO pedidos (cliente_id, data, pagamento_id, endereco_entrega)
+            VALUES (%s, NOW(), %s, %s)
+        """, (data['cliente_id'], data['pagamento_id'], data['endereco_entrega']))
+        pedido_id = cur.lastrowid
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        for item in data['itens']:
+            cur.execute("""
+                INSERT INTO itens_pedido (pedido_id, livro_id, quantidade, preco_unitario)
+                VALUES (%s, %s, %s, %s)
+            """, (pedido_id, item['livro_id'], item['quantidade'], item['preco_unitario']))
 
-    etl_faturar_pedido(pedido_id)
-    return jsonify({"status": "pedido faturado", "id": pedido_id})
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        etl_faturar_pedido(pedido_id)
+
+        return jsonify({"status": "pedido faturado", "id": pedido_id})
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)
